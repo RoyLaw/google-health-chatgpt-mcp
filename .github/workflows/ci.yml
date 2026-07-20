@@ -5,14 +5,14 @@ on:
   pull_request:
 
 jobs:
-  typecheck:
+  typecheck-and-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm install
       - run: npm run typecheck
       - run: npm run build
+      - run: docker build -t google-health-chatgpt-mcp:test .
