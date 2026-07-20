@@ -5,7 +5,6 @@ import { audit, loadGoogleToken, saveGoogleToken, updateAccessToken } from './st
 const GOOGLE_AUTH = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN = 'https://oauth2.googleapis.com/token';
 const HEALTH_BASE = 'https://health.googleapis.com';
-
 const pendingStates = new Map<string, number>();
 
 export function createAuthorizationUrl(): string {
@@ -26,18 +25,16 @@ export async function exchangeAuthorizationCode(code: string, state: string): Pr
   const expiry = pendingStates.get(state);
   pendingStates.delete(state);
   if (!expiry || expiry < Date.now()) throw new Error('OAuth state is invalid or expired');
-
-  const body = new URLSearchParams({
-    client_id: config.GOOGLE_CLIENT_ID,
-    client_secret: config.GOOGLE_CLIENT_SECRET,
-    code,
-    grant_type: 'authorization_code',
-    redirect_uri: `${config.PUBLIC_BASE_URL}/oauth/google/callback`,
-  });
   const response = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
+    body: new URLSearchParams({
+      client_id: config.GOOGLE_CLIENT_ID,
+      client_secret: config.GOOGLE_CLIENT_SECRET,
+      code,
+      grant_type: 'authorization_code',
+      redirect_uri: `${config.PUBLIC_BASE_URL}/oauth/google/callback`,
+    }),
   });
   const json = await response.json() as Record<string, unknown>;
   if (!response.ok || typeof json.refresh_token !== 'string') {
@@ -55,19 +52,16 @@ export async function exchangeAuthorizationCode(code: string, state: string): Pr
 async function accessToken(): Promise<string> {
   const token = await loadGoogleToken();
   if (!token) throw new Error('Google Health is not authorized. Visit /oauth/google/start first.');
-  if (token.accessToken && token.expiresAt && token.expiresAt.getTime() > Date.now() + 120_000) {
-    return token.accessToken;
-  }
-  const body = new URLSearchParams({
-    client_id: config.GOOGLE_CLIENT_ID,
-    client_secret: config.GOOGLE_CLIENT_SECRET,
-    refresh_token: token.refreshToken,
-    grant_type: 'refresh_token',
-  });
+  if (token.accessToken && token.expiresAt && token.expiresAt.getTime() > Date.now() + 120_000) return token.accessToken;
   const response = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
+    body: new URLSearchParams({
+      client_id: config.GOOGLE_CLIENT_ID,
+      client_secret: config.GOOGLE_CLIENT_SECRET,
+      refresh_token: token.refreshToken,
+      grant_type: 'refresh_token',
+    }),
   });
   const json = await response.json() as Record<string, unknown>;
   if (!response.ok || typeof json.access_token !== 'string') {
@@ -81,7 +75,7 @@ async function accessToken(): Promise<string> {
 const ALLOWED_PREFIXES = [
   '/v4/users/me/profile',
   '/v4/users/me/devices',
-  '/v4/users/me/dataSources/',
+  '/v4/users/me/dataTypes/',
   '/v4/users/me/exerciseSessions',
 ];
 
@@ -99,4 +93,9 @@ export async function healthRequest(path: string, query: Record<string, string |
   const text = await response.text();
   if (!response.ok) throw new Error(`Google Health ${response.status}: ${text.slice(0, 1000)}`);
   return text ? JSON.parse(text) : null;
+}
+
+export async function reconcileDataType(slug: string, pageSize = 1000): Promise<unknown> {
+  if (!/^[a-z0-9-]+$/i.test(slug)) throw new Error('Invalid Google Health data type slug');
+  return healthRequest(`/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`, { pageSize });
 }
