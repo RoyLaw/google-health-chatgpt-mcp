@@ -6,7 +6,7 @@ import { HTTPException } from 'hono/http-exception';
 import { config } from './config.js';
 import { createAuthorizationUrl, exchangeAuthorizationCode } from './google.js';
 import { buildMcpServer } from './mcp.js';
-import { mcpResourceMetadataUrl, registerOAuthRoutes, verifyMcpAccessToken } from './oauth.js';
+import { mcpResourceMetadataUrl, registerOAuthRoutes, verifyMcpAccessToken } from './chatgpt-oauth.js';
 import { pool } from './store.js';
 
 const app = new Hono();
