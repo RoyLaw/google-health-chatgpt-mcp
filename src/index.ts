@@ -15,6 +15,21 @@ function tokenMatches(value: string, expected: string): boolean {
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
+function oauthAdminAuthorized(header: string | undefined): boolean {
+  if (!header?.startsWith('Basic ')) return false;
+  try {
+    const decoded = Buffer.from(header.slice(6), 'base64').toString('utf8');
+    const separator = decoded.indexOf(':');
+    if (separator < 0) return false;
+    const username = decoded.slice(0, separator);
+    const password = decoded.slice(separator + 1);
+    return tokenMatches(username, config.OAUTH_ADMIN_USER)
+      && tokenMatches(password, config.OAUTH_ADMIN_PASSWORD);
+  } catch {
+    return false;
+  }
+}
+
 app.get('/health', async (c) => {
   try {
     await pool.query('SELECT 1');
@@ -22,6 +37,14 @@ app.get('/health', async (c) => {
   } catch {
     return c.json({ status: 'degraded', database: 'unavailable' }, 503);
   }
+});
+
+app.use('/oauth/google/*', async (c, next) => {
+  if (!oauthAdminAuthorized(c.req.header('Authorization'))) {
+    c.header('WWW-Authenticate', 'Basic realm="Google Health MCP administration", charset="UTF-8"');
+    return c.text('Administrator authentication required', 401);
+  }
+  await next();
 });
 
 app.get('/oauth/google/start', (c) => c.redirect(createAuthorizationUrl()));
@@ -48,6 +71,7 @@ app.use('/mcp', async (c, next) => {
     c.header('WWW-Authenticate', 'Bearer');
     return c.json({ error: 'unauthorized' }, 401);
   }
+  c.header('Cache-Control', 'no-store');
   await next();
 });
 
