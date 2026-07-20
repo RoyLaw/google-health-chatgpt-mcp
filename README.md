@@ -4,15 +4,26 @@
 
 ## 功能
 
-- Google OAuth 2.0 一次授权，自动刷新 access token
+- Google OAuth 2.0 一次授权，自动刷新 Google access token
+- ChatGPT 到 MCP 使用 OAuth 2.1 Authorization Code + PKCE
+- 支持 OAuth Protected Resource Metadata、Authorization Server Metadata 和动态客户端注册
+- 为 ChatGPT 签发短期 access token 和可轮换 refresh token
 - Streamable HTTP MCP 端点 `/mcp`
-- Bearer Token 保护 MCP 入口
-- HTTP Basic 保护 Google OAuth 管理入口
+- 保留静态 `MCP_ACCESS_TOKEN`，供命令行管理、故障排查和回滚使用
+- HTTP Basic 保护 Google OAuth 管理入口和 ChatGPT OAuth 授权确认
 - 读取活动、睡眠、心率、HRV、血氧、呼吸率、皮温、体重和运动记录
 - 按日期范围读取单项数据、综合概览及两个周期对比
-- reconcile 接口自动分页，并标记截断状态
 - Google refresh token 使用 AES-256-GCM 加密后存入 PostgreSQL
 - Docker Compose 部署
+
+## 两套 OAuth 的区别
+
+本项目包含两套相互独立的 OAuth：
+
+1. `ChatGPT → MCP`：本项目作为 OAuth 2.1 授权服务器，为 ChatGPT 签发 MCP access token 和 refresh token。
+2. `MCP → Google Health`：本项目作为 Google OAuth 客户端，获取读取 Google Health 数据所需的令牌。
+
+ChatGPT 不会获得 Google refresh token，Google Health 凭据只保存在本项目的 PostgreSQL 中。
 
 ## MCP 工具
 
@@ -28,7 +39,8 @@ Google Health 不同账号、设备和地区可用的数据类型可能不同。
 ## 快速开始
 
 1. 在 Google Cloud 启用 Health API，创建 Web OAuth 客户端。
-2. 将授权回调地址配置为：
+
+2. 将 Google 授权回调地址配置为：
 
 ```text
 https://你的域名/oauth/google/callback
@@ -39,46 +51,93 @@ https://你的域名/oauth/google/callback
 ```bash
 cp .env.example .env
 
-# TOKEN_ENCRYPTION_KEY
-openssl rand -base64 32
-
-# MCP_ACCESS_TOKEN
-openssl rand -hex 32
-
-# OAUTH_ADMIN_PASSWORD
-openssl rand -base64 24
+openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
+openssl rand -hex 32     # MCP_ACCESS_TOKEN
+openssl rand -base64 24  # OAUTH_ADMIN_PASSWORD
 ```
 
-请确保 `DATABASE_URL` 中的数据库密码与 `POSTGRES_PASSWORD` 一致。
+请确保 `DATABASE_URL` 中的数据库密码与 `POSTGRES_PASSWORD` 一致。`OAUTH_ADMIN_PASSWORD` 同时用于 Google Health 管理授权和用户确认 ChatGPT 的 MCP OAuth 授权。
 
-4. 启动服务：
+4. 启动数据库并应用最新表结构：
 
 ```bash
-docker compose up -d --build
+docker compose up -d postgres
+docker compose run --rm app npm run db:init
 ```
 
-5. 浏览器访问以下地址，浏览器会要求输入 `OAUTH_ADMIN_USER` 和 `OAUTH_ADMIN_PASSWORD`：
+5. 构建并启动应用：
+
+```bash
+docker compose up -d --build --force-recreate app
+```
+
+6. 浏览器访问以下地址，并输入 `OAUTH_ADMIN_USER` 和 `OAUTH_ADMIN_PASSWORD`，完成 Google Health 授权：
 
 ```text
 https://你的域名/oauth/google/start
 ```
 
-6. 完成 Google 授权后检查服务：
+7. 检查服务：
 
 ```bash
 curl https://你的域名/health
 ```
 
-7. MCP 服务地址：
+## 在 ChatGPT 中添加
+
+MCP 地址：
 
 ```text
 https://你的域名/mcp
 ```
 
-请求需要携带：
+认证方式选择 OAuth。ChatGPT 会依次执行：
 
-```http
-Authorization: Bearer <MCP_ACCESS_TOKEN>
+1. 未携带令牌访问 `/mcp`，收到带 `resource_metadata` 的 `401`。
+2. 获取 `/.well-known/oauth-protected-resource/mcp`。
+3. 获取 `/.well-known/oauth-authorization-server/mcp`。
+4. 调用 `/oauth/register` 动态注册公共 PKCE 客户端。
+5. 打开 `/oauth/authorize`。浏览器会要求输入 `OAUTH_ADMIN_USER` 和 `OAUTH_ADMIN_PASSWORD`。
+6. 使用 `/oauth/token` 换取 access token 和 refresh token。
+7. 扫描 MCP 工具。
+
+## OAuth 端点
+
+```text
+GET  /.well-known/oauth-protected-resource
+GET  /.well-known/oauth-protected-resource/mcp
+GET  /.well-known/oauth-authorization-server
+GET  /.well-known/oauth-authorization-server/mcp
+POST /oauth/register
+GET  /oauth/authorize
+POST /oauth/token
+```
+
+实现支持：
+
+- Authorization Code
+- PKCE S256
+- Dynamic Client Registration
+- Refresh Token
+- Refresh Token Rotation
+- Resource Indicator：`https://你的域名/mcp`
+- Scope：`mcp:read`
+
+## 静态 Token 测试
+
+静态 `MCP_ACCESS_TOKEN` 仍可用于服务器端 curl 测试：
+
+```bash
+curl -X POST 'https://你的域名/mcp' \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data-raw '{
+    "jsonrpc":"2.0",
+    "id":1,
+    "method":"tools/list",
+    "params":{}
+  }'
 ```
 
 ## OpenAI Responses API 示例
@@ -94,53 +153,79 @@ const response = await client.responses.create({
     headers: {
       Authorization: `Bearer ${process.env.MCP_ACCESS_TOKEN}`
     },
-    allowed_tools: [
-      "get_health_overview",
-      "compare_health_periods"
-    ],
+    allowed_tools: ["get_health_overview", "compare_health_periods"],
     require_approval: "never"
   }]
 });
 ```
 
-模型调用 `get_health_overview` 时需要提供日期范围，例如：
+## Nginx 反向代理要求
 
-```json
-{
-  "startDate": "2026-06-23",
-  "endDate": "2026-07-20"
-}
-```
-
-周期比较示例：
-
-```json
-{
-  "firstStartDate": "2026-05-26",
-  "firstEndDate": "2026-06-22",
-  "secondStartDate": "2026-06-23",
-  "secondEndDate": "2026-07-20"
-}
-```
-
-## 反向代理要求
-
-Nginx 或 Caddy 必须保留 `Authorization` 请求头，并关闭 MCP 路径的代理缓冲。Nginx 示例：
+不能根据 OpenAI 的来源 IP、User-Agent、Referer 或空 Authorization 请求返回 444。首次 OAuth 探测访问 `/mcp` 时本来就没有 Bearer Token，必须转发给应用，让应用返回带 OAuth 元数据地址的 401。
 
 ```nginx
-location /mcp {
+location = /mcp {
     proxy_pass http://127.0.0.1:8787;
     proxy_http_version 1.1;
     proxy_set_header Host $host;
     proxy_set_header Authorization $http_authorization;
+    proxy_set_header Mcp-Session-Id $http_mcp_session_id;
+    proxy_set_header Last-Event-ID $http_last_event_id;
+    proxy_set_header X-Forwarded-Proto $scheme;
     proxy_buffering off;
-    proxy_read_timeout 300s;
+    proxy_cache off;
+    gzip off;
+    proxy_read_timeout 3600s;
 }
+
+location ^~ /.well-known/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+
+location ^~ /oauth/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_set_header Host $host;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+修改后检查：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+以下请求必须到达应用，不能返回 444：
+
+```bash
+curl -i https://你的域名/.well-known/oauth-protected-resource/mcp
+curl -i https://你的域名/.well-known/oauth-authorization-server/mcp
+curl -i -X POST https://你的域名/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"oauth-probe","version":"1.0"}}}'
+```
+
+最后一个请求在未携带令牌时应返回 `401`，且 `WWW-Authenticate` 中包含 `resource_metadata`。
+
+## 升级已有部署
+
+拉取代码后必须重新执行数据库初始化，脚本使用 `CREATE TABLE IF NOT EXISTS`，不会删除已有 Google OAuth 数据：
+
+```bash
+git pull
+docker compose up -d postgres
+docker compose run --rm app npm run db:init
+docker compose up -d --build --force-recreate app
 ```
 
 ## 安全说明
 
-本项目只开放读取工具。请仅通过 HTTPS 暴露服务，不要公开 `.env`、PostgreSQL 端口、MCP Token 或 OAuth 管理密码。OAuth 管理入口会覆盖当前保存的 Google 授权，因此必须保持管理员认证。建议同时在反向代理层加入速率限制和访问日志脱敏。
+本项目只开放读取工具。请仅通过 HTTPS 暴露服务，不要公开 `.env`、PostgreSQL 端口、MCP Token、Google 凭据或 OAuth 管理密码。OAuth authorization code 有效期为 5 分钟，access token 有效期为 1 小时，refresh token 有效期为 30 天并在每次使用时轮换。建议在反向代理层对 `/oauth/register`、`/oauth/authorize` 和 `/oauth/token` 加入合理速率限制，并对访问日志进行脱敏。
 
 ## 数据兼容性
 
