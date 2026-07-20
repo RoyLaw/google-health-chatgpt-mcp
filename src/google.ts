@@ -25,6 +25,7 @@ export async function exchangeAuthorizationCode(code: string, state: string): Pr
   const expiry = pendingStates.get(state);
   pendingStates.delete(state);
   if (!expiry || expiry < Date.now()) throw new Error('OAuth state is invalid or expired');
+
   const response = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -52,7 +53,10 @@ export async function exchangeAuthorizationCode(code: string, state: string): Pr
 async function accessToken(): Promise<string> {
   const token = await loadGoogleToken();
   if (!token) throw new Error('Google Health is not authorized. Visit /oauth/google/start first.');
-  if (token.accessToken && token.expiresAt && token.expiresAt.getTime() > Date.now() + 120_000) return token.accessToken;
+  if (token.accessToken && token.expiresAt && token.expiresAt.getTime() > Date.now() + 120_000) {
+    return token.accessToken;
+  }
+
   const response = await fetch(GOOGLE_TOKEN, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -74,12 +78,16 @@ async function accessToken(): Promise<string> {
 
 const ALLOWED_PREFIXES = [
   '/v4/users/me/profile',
-  '/v4/users/me/devices',
+  '/v4/users/me/pairedDevices',
   '/v4/users/me/dataTypes/',
-  '/v4/users/me/exerciseSessions',
 ];
 
-export async function healthRequest(path: string, query: Record<string, string | number | undefined> = {}): Promise<unknown> {
+type QueryValue = string | number | undefined;
+
+export async function healthRequest(
+  path: string,
+  query: Record<string, QueryValue> = {},
+): Promise<unknown> {
   if (!ALLOWED_PREFIXES.some((prefix) => path.startsWith(prefix))) {
     throw new Error('Requested Google Health path is not in the read-only allowlist');
   }
@@ -95,7 +103,88 @@ export async function healthRequest(path: string, query: Record<string, string |
   return text ? JSON.parse(text) : null;
 }
 
-export async function reconcileDataType(slug: string, pageSize = 1000): Promise<unknown> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function civilDate(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const year = value.year;
+  const month = value.month;
+  const day = value.day;
+  if (typeof year === 'number' && typeof month === 'number' && typeof day === 'number') {
+    return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  for (const child of Object.values(value)) {
+    const found = civilDate(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+export type ReconcileOptions = {
+  pageSize?: number;
+  maxPages?: number;
+  startDate?: string;
+  endDate?: string;
+};
+
+export type ReconcileResult = {
+  slug: string;
+  dataPoints: Array<Record<string, unknown>>;
+  fetchedPages: number;
+  truncated: boolean;
+  dateFilterApplied: boolean;
+};
+
+export async function reconcileDataType(
+  slug: string,
+  options: ReconcileOptions = {},
+): Promise<ReconcileResult> {
   if (!/^[a-z0-9-]+$/i.test(slug)) throw new Error('Invalid Google Health data type slug');
-  return healthRequest(`/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`, { pageSize });
+  const pageSize = Math.min(Math.max(options.pageSize ?? 1000, 1), 1000);
+  const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50);
+  const dataPoints: Array<Record<string, unknown>> = [];
+  let pageToken: string | undefined;
+  let fetchedPages = 0;
+  let truncated = false;
+
+  do {
+    const response = await healthRequest(
+      `/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`,
+      { pageSize, pageToken },
+    );
+    if (!isRecord(response)) throw new Error(`Unexpected reconcile response for ${slug}`);
+    const points = Array.isArray(response.dataPoints)
+      ? response.dataPoints.filter(isRecord)
+      : [];
+    dataPoints.push(...points);
+    pageToken = typeof response.nextPageToken === 'string' && response.nextPageToken
+      ? response.nextPageToken
+      : undefined;
+    fetchedPages += 1;
+    if (pageToken && fetchedPages >= maxPages) {
+      truncated = true;
+      break;
+    }
+  } while (pageToken);
+
+  const hasDateRange = Boolean(options.startDate || options.endDate);
+  const filtered = hasDateRange
+    ? dataPoints.filter((point) => {
+        const date = civilDate(point);
+        if (!date) return false;
+        if (options.startDate && date < options.startDate) return false;
+        if (options.endDate && date > options.endDate) return false;
+        return true;
+      })
+    : dataPoints;
+
+  return {
+    slug,
+    dataPoints: filtered,
+    fetchedPages,
+    truncated,
+    dateFilterApplied: hasDateRange,
+  };
 }
