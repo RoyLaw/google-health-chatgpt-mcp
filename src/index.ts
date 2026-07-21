@@ -2,9 +2,11 @@ import crypto from 'node:crypto';
 import { serve } from '@hono/node-server';
 import { StreamableHTTPTransport } from '@hono/mcp';
 import { Hono } from 'hono';
+import { HTTPException } from 'hono/http-exception';
 import { config } from './config.js';
 import { createAuthorizationUrl, exchangeAuthorizationCode } from './google.js';
 import { buildMcpServer } from './mcp.js';
+import { mcpResourceMetadataUrl, registerOAuthRoutes, verifyMcpAccessToken } from './chatgpt-oauth.js';
 import { pool } from './store.js';
 
 const app = new Hono();
@@ -33,11 +35,13 @@ function oauthAdminAuthorized(header: string | undefined): boolean {
 app.get('/health', async (c) => {
   try {
     await pool.query('SELECT 1');
-    return c.json({ status: 'ok', service: 'google-health-chatgpt-mcp', mcp: '/mcp' });
+    return c.json({ status: 'ok', service: 'google-health-chatgpt-mcp', mcp: '/mcp', oauth: true });
   } catch {
     return c.json({ status: 'degraded', database: 'unavailable' }, 503);
   }
 });
+
+registerOAuthRoutes(app);
 
 app.use('/oauth/google/*', async (c, next) => {
   if (!oauthAdminAuthorized(c.req.header('Authorization'))) {
@@ -67,12 +71,48 @@ app.get('/oauth/google/callback', async (c) => {
 app.use('/mcp', async (c, next) => {
   const authorization = c.req.header('Authorization');
   const supplied = authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
-  if (!supplied || !tokenMatches(supplied, config.MCP_ACCESS_TOKEN)) {
-    c.header('WWW-Authenticate', 'Bearer');
-    return c.json({ error: 'unauthorized' }, 401);
+
+  if (!supplied || !(await verifyMcpAccessToken(supplied))) {
+    c.header(
+      'WWW-Authenticate',
+      `Bearer realm="google-health-mcp", resource_metadata="${mcpResourceMetadataUrl()}"`,
+    );
+    return c.json({
+      error: 'unauthorized',
+      message: 'A valid OAuth access token is required',
+    }, 401);
   }
+
   c.header('Cache-Control', 'no-store');
   await next();
+});
+
+app.options('/mcp', (c) => {
+  c.header('Allow', 'GET, POST, DELETE, OPTIONS');
+  c.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  c.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept, Mcp-Session-Id, Last-Event-ID');
+  c.header('Access-Control-Expose-Headers', 'Mcp-Session-Id');
+  c.header('Access-Control-Max-Age', '86400');
+  return c.body(null, 204);
+});
+
+app.get('/mcp', async (c) => {
+  const accept = c.req.header('Accept') ?? '';
+  if (!accept.toLowerCase().includes('text/event-stream')) {
+    c.header('Allow', 'POST, OPTIONS');
+    return c.json({
+      jsonrpc: '2.0',
+      error: { code: -32000, message: 'Use POST for MCP JSON-RPC requests' },
+      id: null,
+    }, 405);
+  }
+
+  c.header('Allow', 'POST, OPTIONS');
+  return c.json({
+    jsonrpc: '2.0',
+    error: { code: -32000, message: 'Standalone SSE GET is not supported; use POST' },
+    id: null,
+  }, 405);
 });
 
 app.all('/mcp', async (c) => {
@@ -84,9 +124,22 @@ app.all('/mcp', async (c) => {
 });
 
 app.onError((error, c) => {
-  console.error(error);
-  return c.json({ error: 'internal_error', message: error.message }, 500);
+  if (error instanceof HTTPException) {
+    console.warn(`HTTP ${error.status} ${c.req.method} ${c.req.path}: ${error.message}`);
+    return error.getResponse();
+  }
+
+  console.error(`Unhandled error during ${c.req.method} ${c.req.path}:`, error);
+  return c.json({
+    error: 'internal_error',
+    message: error instanceof Error ? error.message : String(error),
+  }, 500);
 });
+
+app.notFound((c) => c.json({
+  error: 'not_found',
+  message: `Route not found: ${c.req.method} ${c.req.path}`,
+}, 404));
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(`Google Health MCP listening on http://0.0.0.0:${info.port}`);
