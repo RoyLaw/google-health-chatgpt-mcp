@@ -1,12 +1,13 @@
 {
   "name": "google-health-chatgpt-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "test": "node --import tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit",
     "db:init": "tsx scripts/init-db.ts"
   },
