@@ -5,6 +5,7 @@ import {
   maxDailyRollupRangeDays,
   normalizeReconciledPoint,
   observationDate,
+  sortDailyRollupDataPoints,
   splitDailyRollupRange,
 } from '../src/health-data.js';
 
@@ -86,5 +87,18 @@ test('splits heart-rate daily rollups into API-safe 14-day chunks', () => {
         exclusiveEndDate: '2026-07-29',
       },
     ],
+  );
+});
+
+test('sorts daily rollup points chronologically across chunks', () => {
+  const points = [
+    { civilStartTime: { date: { year: 2026, month: 7, day: 9 } } },
+    { civilStartTime: { date: { year: 2026, month: 6, day: 26 } } },
+    { civilStartTime: { date: { year: 2026, month: 7, day: 23 } } },
+    { civilStartTime: { date: { year: 2026, month: 7, day: 10 } } },
+  ];
+  assert.deepEqual(
+    sortDailyRollupDataPoints(points),
+    [points[1], points[0], points[3], points[2]],
   );
 });
