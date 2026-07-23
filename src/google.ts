@@ -5,6 +5,7 @@ import {
   civilDateTime,
   dailyRollupDataTypes,
   isRecord,
+  maxDailyRollupRangeDays,
   maxReconcilePageSize,
   normalizeReconciledPoint,
   observationDate,
@@ -248,7 +249,8 @@ export async function dailyRollUpDataType(
   if (!DAILY_ROLLUP_DATA_TYPES.has(slug)) {
     throw new Error(`Google Health daily rollup is not supported for data type: ${slug}`);
   }
-  const pageSize = Math.min(Math.max(options.pageSize ?? 10_000, 1), 10_000);
+  const maximumRangeDays = maxDailyRollupRangeDays(slug);
+  const pageSize = Math.min(Math.max(options.pageSize ?? maximumRangeDays, 1), maximumRangeDays);
   const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50);
   const chunks = splitDailyRollupRange(slug, options.startDate, options.endDate);
   const rollupDataPoints: Array<Record<string, unknown>> = [];
