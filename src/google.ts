@@ -9,6 +9,7 @@ import {
   maxReconcilePageSize,
   normalizeReconciledPoint,
   observationDate,
+  sortDailyRollupDataPoints,
   splitDailyRollupRange,
 } from './health-data.js';
 import { audit, loadGoogleToken, saveGoogleToken, updateAccessToken } from './store.js';
@@ -303,7 +304,7 @@ export async function dailyRollUpDataType(
     mode: 'daily-rollup',
     slug,
     period: { startDate: options.startDate, endDate: options.endDate },
-    rollupDataPoints,
+    rollupDataPoints: sortDailyRollupDataPoints(rollupDataPoints),
     fetchedPages,
     requestedChunks: chunks.length,
     completedChunks,
