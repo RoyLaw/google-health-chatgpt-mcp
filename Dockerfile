@@ -13,5 +13,6 @@ ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm install --omit=dev
 COPY --from=build /app/dist ./dist
+COPY sql ./sql
 EXPOSE 8787
 CMD ["node", "dist/src/index.js"]
