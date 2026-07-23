@@ -1,11 +1,22 @@
 import crypto from 'node:crypto';
 import { config, googleScopes } from './config.js';
+import {
+  buildReconcileFilter,
+  civilDateTime,
+  dailyRollupDataTypes,
+  isRecord,
+  maxReconcilePageSize,
+  normalizeReconciledPoint,
+  observationDate,
+  splitDailyRollupRange,
+} from './health-data.js';
 import { audit, loadGoogleToken, saveGoogleToken, updateAccessToken } from './store.js';
 
 const GOOGLE_AUTH = 'https://accounts.google.com/o/oauth2/v2/auth';
 const GOOGLE_TOKEN = 'https://oauth2.googleapis.com/token';
 const HEALTH_BASE = 'https://health.googleapis.com';
 const pendingStates = new Map<string, number>();
+const DAILY_ROLLUP_DATA_TYPES = new Set(dailyRollupDataTypes);
 
 export function createAuthorizationUrl(): string {
   const state = crypto.randomBytes(24).toString('hex');
@@ -83,10 +94,15 @@ const ALLOWED_PREFIXES = [
 ];
 
 type QueryValue = string | number | undefined;
+type HealthRequestOptions = {
+  method?: 'GET' | 'POST';
+  body?: unknown;
+};
 
 export async function healthRequest(
   path: string,
   query: Record<string, QueryValue> = {},
+  options: HealthRequestOptions = {},
 ): Promise<unknown> {
   if (!ALLOWED_PREFIXES.some((prefix) => path.startsWith(prefix))) {
     throw new Error('Requested Google Health path is not in the read-only allowlist');
@@ -95,62 +111,19 @@ export async function healthRequest(
   for (const [name, value] of Object.entries(query)) {
     if (value !== undefined && value !== '') url.searchParams.set(name, String(value));
   }
+  const method = options.method ?? 'GET';
   const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${await accessToken()}`, Accept: 'application/json' },
+    method,
+    headers: {
+      Authorization: `Bearer ${await accessToken()}`,
+      Accept: 'application/json',
+      ...(options.body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`Google Health ${response.status}: ${text.slice(0, 1000)}`);
   return text ? JSON.parse(text) : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function civilDate(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const year = value.year;
-  const month = value.month;
-  const day = value.day;
-  if (typeof year === 'number' && typeof month === 'number' && typeof day === 'number') {
-    return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  }
-  for (const child of Object.values(value)) {
-    const found = civilDate(child);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function timestampDate(timestamp: unknown, utcOffset: unknown): string | undefined {
-  if (typeof timestamp !== 'string' || typeof utcOffset !== 'string') return undefined;
-  const offsetMatch = /^([+-]?\d+(?:\.\d+)?)s$/.exec(utcOffset);
-  if (!offsetMatch) return undefined;
-  const instant = Date.parse(timestamp);
-  const offsetSeconds = Number(offsetMatch[1]);
-  if (!Number.isFinite(instant) || !Number.isFinite(offsetSeconds)) return undefined;
-  return new Date(instant + offsetSeconds * 1000).toISOString().slice(0, 10);
-}
-
-function timestampBasedDate(value: unknown): string | undefined {
-  if (!isRecord(value)) return undefined;
-
-  // Session records such as sleep and exercise are assigned to their local end
-  // date, so an overnight session belongs to the day on which the user wakes.
-  const direct = timestampDate(value.endTime, value.endUtcOffset)
-    ?? timestampDate(value.startTime, value.startUtcOffset)
-    ?? timestampDate(value.physicalTime, value.utcOffset);
-  if (direct) return direct;
-
-  for (const child of Object.values(value)) {
-    const found = timestampBasedDate(child);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function observationDate(value: unknown): string | undefined {
-  return civilDate(value) ?? timestampBasedDate(value);
 }
 
 export type ReconcileOptions = {
@@ -161,11 +134,15 @@ export type ReconcileOptions = {
 };
 
 export type ReconcileResult = {
+  mode: 'reconcile';
   slug: string;
   dataPoints: Array<Record<string, unknown>>;
   fetchedPages: number;
   truncated: boolean;
   dateFilterApplied: boolean;
+  serverFilterApplied: boolean;
+  serverFilterFallback: boolean;
+  removedSleepStageDuplicates: number;
 };
 
 export async function reconcileDataType(
@@ -173,23 +150,45 @@ export async function reconcileDataType(
   options: ReconcileOptions = {},
 ): Promise<ReconcileResult> {
   if (!/^[a-z0-9-]+$/i.test(slug)) throw new Error('Invalid Google Health data type slug');
-  const pageSize = Math.min(Math.max(options.pageSize ?? 1000, 1), 1000);
+  const maximumPageSize = maxReconcilePageSize(slug);
+  const pageSize = Math.min(Math.max(options.pageSize ?? maximumPageSize, 1), maximumPageSize);
   const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50);
   const dataPoints: Array<Record<string, unknown>> = [];
   let pageToken: string | undefined;
   let fetchedPages = 0;
   let truncated = false;
+  let serverFilter = buildReconcileFilter(slug, options.startDate, options.endDate);
+  let serverFilterFallback = false;
+  let removedSleepStageDuplicates = 0;
 
   do {
-    const response = await healthRequest(
-      `/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`,
-      { pageSize, pageToken },
-    );
+    let response: unknown;
+    try {
+      response = await healthRequest(
+        `/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`,
+        { pageSize, pageToken, filter: serverFilter },
+      );
+    } catch (error) {
+      if (serverFilter && fetchedPages === 0) {
+        serverFilter = undefined;
+        serverFilterFallback = true;
+        response = await healthRequest(
+          `/v4/users/me/dataTypes/${slug}/dataPoints:reconcile`,
+          { pageSize, pageToken },
+        );
+      } else {
+        throw error;
+      }
+    }
     if (!isRecord(response)) throw new Error(`Unexpected reconcile response for ${slug}`);
     const points = Array.isArray(response.dataPoints)
       ? response.dataPoints.filter(isRecord)
       : [];
-    dataPoints.push(...points);
+    for (const point of points) {
+      const normalized = normalizeReconciledPoint(point, slug);
+      dataPoints.push(normalized.point);
+      removedSleepStageDuplicates += normalized.removedSleepStageDuplicates;
+    }
     pageToken = typeof response.nextPageToken === 'string' && response.nextPageToken
       ? response.nextPageToken
       : undefined;
@@ -203,7 +202,7 @@ export async function reconcileDataType(
   const hasDateRange = Boolean(options.startDate || options.endDate);
   const filtered = hasDateRange
     ? dataPoints.filter((point) => {
-        const date = observationDate(point);
+        const date = observationDate(point, slug);
         if (!date) return false;
         if (options.startDate && date < options.startDate) return false;
         if (options.endDate && date > options.endDate) return false;
@@ -212,10 +211,100 @@ export async function reconcileDataType(
     : dataPoints;
 
   return {
+    mode: 'reconcile',
     slug,
     dataPoints: filtered,
     fetchedPages,
     truncated,
     dateFilterApplied: hasDateRange,
+    serverFilterApplied: Boolean(serverFilter),
+    serverFilterFallback,
+    removedSleepStageDuplicates,
+  };
+}
+
+export type DailyRollupOptions = {
+  startDate: string;
+  endDate: string;
+  pageSize?: number;
+  maxPages?: number;
+};
+
+export type DailyRollupResult = {
+  mode: 'daily-rollup';
+  slug: string;
+  period: { startDate: string; endDate: string };
+  rollupDataPoints: Array<Record<string, unknown>>;
+  fetchedPages: number;
+  requestedChunks: number;
+  completedChunks: number;
+  truncated: boolean;
+};
+
+export async function dailyRollUpDataType(
+  slug: string,
+  options: DailyRollupOptions,
+): Promise<DailyRollupResult> {
+  if (!DAILY_ROLLUP_DATA_TYPES.has(slug)) {
+    throw new Error(`Google Health daily rollup is not supported for data type: ${slug}`);
+  }
+  const pageSize = Math.min(Math.max(options.pageSize ?? 10_000, 1), 10_000);
+  const maxPages = Math.min(Math.max(options.maxPages ?? 10, 1), 50);
+  const chunks = splitDailyRollupRange(slug, options.startDate, options.endDate);
+  const rollupDataPoints: Array<Record<string, unknown>> = [];
+  let fetchedPages = 0;
+  let completedChunks = 0;
+  let truncated = false;
+
+  for (const chunk of chunks) {
+    if (fetchedPages >= maxPages) {
+      truncated = true;
+      break;
+    }
+    let pageToken: string | undefined;
+    do {
+      const response = await healthRequest(
+        `/v4/users/me/dataTypes/${slug}/dataPoints:dailyRollUp`,
+        {},
+        {
+          method: 'POST',
+          body: {
+            range: {
+              start: civilDateTime(chunk.startDate),
+              end: civilDateTime(chunk.exclusiveEndDate),
+            },
+            windowSizeDays: 1,
+            pageSize,
+            pageToken,
+          },
+        },
+      );
+      if (!isRecord(response)) throw new Error(`Unexpected daily rollup response for ${slug}`);
+      const points = Array.isArray(response.rollupDataPoints)
+        ? response.rollupDataPoints.filter(isRecord)
+        : [];
+      rollupDataPoints.push(...points);
+      pageToken = typeof response.nextPageToken === 'string' && response.nextPageToken
+        ? response.nextPageToken
+        : undefined;
+      fetchedPages += 1;
+      if (pageToken && fetchedPages >= maxPages) {
+        truncated = true;
+        break;
+      }
+    } while (pageToken);
+    if (truncated) break;
+    completedChunks += 1;
+  }
+
+  return {
+    mode: 'daily-rollup',
+    slug,
+    period: { startDate: options.startDate, endDate: options.endDate },
+    rollupDataPoints,
+    fetchedPages,
+    requestedChunks: chunks.length,
+    completedChunks,
+    truncated,
   };
 }
