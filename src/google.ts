@@ -122,6 +122,37 @@ function civilDate(value: unknown): string | undefined {
   return undefined;
 }
 
+function timestampDate(timestamp: unknown, utcOffset: unknown): string | undefined {
+  if (typeof timestamp !== 'string' || typeof utcOffset !== 'string') return undefined;
+  const offsetMatch = /^([+-]?\d+(?:\.\d+)?)s$/.exec(utcOffset);
+  if (!offsetMatch) return undefined;
+  const instant = Date.parse(timestamp);
+  const offsetSeconds = Number(offsetMatch[1]);
+  if (!Number.isFinite(instant) || !Number.isFinite(offsetSeconds)) return undefined;
+  return new Date(instant + offsetSeconds * 1000).toISOString().slice(0, 10);
+}
+
+function timestampBasedDate(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+
+  // Session records such as sleep and exercise are assigned to their local end
+  // date, so an overnight session belongs to the day on which the user wakes.
+  const direct = timestampDate(value.endTime, value.endUtcOffset)
+    ?? timestampDate(value.startTime, value.startUtcOffset)
+    ?? timestampDate(value.physicalTime, value.utcOffset);
+  if (direct) return direct;
+
+  for (const child of Object.values(value)) {
+    const found = timestampBasedDate(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function observationDate(value: unknown): string | undefined {
+  return civilDate(value) ?? timestampBasedDate(value);
+}
+
 export type ReconcileOptions = {
   pageSize?: number;
   maxPages?: number;
@@ -172,7 +203,7 @@ export async function reconcileDataType(
   const hasDateRange = Boolean(options.startDate || options.endDate);
   const filtered = hasDateRange
     ? dataPoints.filter((point) => {
-        const date = civilDate(point);
+        const date = observationDate(point);
         if (!date) return false;
         if (options.startDate && date < options.startDate) return false;
         if (options.endDate && date > options.endDate) return false;
