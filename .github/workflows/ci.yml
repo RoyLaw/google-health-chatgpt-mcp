@@ -17,3 +17,5 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: docker build -t google-health-chatgpt-mcp:test .
+      - run: docker run --rm google-health-chatgpt-mcp:test test -f /app/dist/scripts/init-db.js
+      - run: docker run --rm google-health-chatgpt-mcp:test test -f /app/sql/schema.sql
