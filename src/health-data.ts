@@ -240,6 +240,23 @@ export function maxDailyRollupRangeDays(slug: string): number {
   return SHORT_ROLLUP_RANGE_TYPES.has(slug) ? 14 : 90;
 }
 
+export function sortDailyRollupDataPoints(
+  points: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return [...points].sort((left, right) => {
+    const leftDate = isRecord(left.civilStartTime)
+      ? directCivilDate(left.civilStartTime)
+      : undefined;
+    const rightDate = isRecord(right.civilStartTime)
+      ? directCivilDate(right.civilStartTime)
+      : undefined;
+    if (!leftDate && !rightDate) return 0;
+    if (!leftDate) return 1;
+    if (!rightDate) return -1;
+    return leftDate.localeCompare(rightDate);
+  });
+}
+
 export function splitDailyRollupRange(
   slug: string,
   startDate: string,
