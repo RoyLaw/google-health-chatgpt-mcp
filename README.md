@@ -59,10 +59,11 @@ openssl rand -base64 24  # OAUTH_ADMIN_PASSWORD
 
 请确保 `DATABASE_URL` 中的数据库密码与 `POSTGRES_PASSWORD` 一致。`OAUTH_ADMIN_PASSWORD` 同时用于 Google Health 管理授权和用户确认 ChatGPT 的 MCP OAuth 授权。
 
-4. 启动数据库并应用最新表结构：
+4. 启动数据库，构建应用镜像并应用最新表结构：
 
 ```bash
 docker compose up -d postgres
+docker compose build app
 docker compose run --rm app npm run db:init
 ```
 
@@ -220,8 +221,9 @@ curl -i -X POST https://你的域名/mcp \
 ```bash
 git pull
 docker compose up -d postgres
+docker compose build app
 docker compose run --rm app npm run db:init
-docker compose up -d --build --force-recreate app
+docker compose up -d --force-recreate app
 ```
 
 ## 安全说明
