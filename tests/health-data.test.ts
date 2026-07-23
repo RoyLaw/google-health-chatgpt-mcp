@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildReconcileFilter,
+  maxDailyRollupRangeDays,
   normalizeReconciledPoint,
   observationDate,
   splitDailyRollupRange,
@@ -69,6 +70,8 @@ test('removes only exact duplicate sleep stage summaries', () => {
 });
 
 test('splits heart-rate daily rollups into API-safe 14-day chunks', () => {
+  assert.equal(maxDailyRollupRangeDays('heart-rate'), 14);
+  assert.equal(maxDailyRollupRangeDays('steps'), 90);
   assert.deepEqual(
     splitDailyRollupRange('heart-rate', '2026-07-01', '2026-07-28'),
     [
