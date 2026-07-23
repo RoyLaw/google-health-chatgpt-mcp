@@ -236,6 +236,10 @@ export type DateRangeChunk = {
   exclusiveEndDate: string;
 };
 
+export function maxDailyRollupRangeDays(slug: string): number {
+  return SHORT_ROLLUP_RANGE_TYPES.has(slug) ? 14 : 90;
+}
+
 export function splitDailyRollupRange(
   slug: string,
   startDate: string,
@@ -244,7 +248,7 @@ export function splitDailyRollupRange(
   parseIsoDate(startDate);
   parseIsoDate(endDate);
   if (startDate > endDate) throw new Error('startDate must not be later than endDate');
-  const maxDays = SHORT_ROLLUP_RANGE_TYPES.has(slug) ? 14 : 90;
+  const maxDays = maxDailyRollupRangeDays(slug);
   const chunks: DateRangeChunk[] = [];
   let chunkStart = startDate;
   while (chunkStart <= endDate) {
