@@ -14,5 +14,6 @@ jobs:
           node-version: 22
       - run: npm install
       - run: npm run typecheck
+      - run: npm test
       - run: npm run build
       - run: docker build -t google-health-chatgpt-mcp:test .
